@@ -24,7 +24,7 @@
 #     ok-to-review:
 #       if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/ok-to-review ')
 #       uses: review-processing/actions/.github/workflows/ok-to-review.yaml@<sha>
-#       permissions: { actions: write, pull-requests: read }
+#       permissions: { actions: write, issues: write, pull-requests: read }
 
 name: ok-to-review
 
@@ -43,6 +43,7 @@ jobs:
     runs-on: ubuntu-26.04
     permissions:
       actions: write
+      issues: write # react to the command comment
       pull-requests: read
     steps:
       - name: Approve or re-run the PR build for the given commit
@@ -52,9 +53,14 @@ jobs:
           PR_NUMBER: ${{ github.event.issue.number }}
           COMMENT_BODY: ${{ github.event.comment.body }}
           COMMENTER: ${{ github.event.comment.user.login }}
+          COMMENT_ID: ${{ github.event.comment.id }}
           PR_WORKFLOW: ${{ inputs.pr-workflow }}
         run: |
           set -euo pipefail
+          # 👍 on the command comment when the review build is approved or re-run, 👎 otherwise.
+          react() { gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content="$1" >/dev/null || true; }
+          accepted=false
+          trap 'if [[ "$accepted" == true ]]; then react +1; else react -1; fi' EXIT
           if [[ ! "$COMMENT_BODY" =~ ^/ok-to-review\ ([0-9a-f]{7,40})[[:space:]]*$ ]]; then
             echo "::notice::Usage: /ok-to-review <commit sha>"
             exit 0
@@ -84,9 +90,11 @@ jobs:
           if [[ "$conclusion" == "action_required" || "$status" == "waiting" ]]; then
             echo "Approving fork run $run_id for $sha"
             gh api -X POST "repos/$REPO/actions/runs/$run_id/approve"
+            accepted=true
           elif [[ "$status" == "completed" ]]; then
             echo "Re-running $run_id for $sha"
             gh run rerun "$run_id" --repo "$REPO"
+            accepted=true
           else
             echo "::notice::Run $run_id for $sha is still $status; comment /ok-to-review again once it has completed"
           fi
