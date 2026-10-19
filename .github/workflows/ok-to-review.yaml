@@ -24,7 +24,7 @@
 #     ok-to-review:
 #       if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/ok-to-review ')
 #       uses: review-processing/actions/.github/workflows/ok-to-review.yaml@<sha>
-#       permissions: { actions: write, issues: write, pull-requests: read }
+#       permissions: { actions: write, pull-requests: write }
 
 name: ok-to-review
 
@@ -43,8 +43,7 @@ jobs:
     runs-on: ubuntu-26.04
     permissions:
       actions: write
-      issues: write # react to the command comment
-      pull-requests: read
+      pull-requests: write # react to the command comment
     steps:
       - name: Approve or re-run the PR build for the given commit
         env:
@@ -58,7 +57,8 @@ jobs:
         run: |
           set -euo pipefail
           # 👍 on the command comment when the review build is approved or re-run, 👎 otherwise.
-          react() { gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content="$1" >/dev/null || true; }
+          react() { gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content="$1" >/dev/null \
+            || echo "::warning::Could not add the $1 reaction"; }
           accepted=false
           trap 'if [[ "$accepted" == true ]]; then react +1; else react -1; fi' EXIT
           if [[ ! "$COMMENT_BODY" =~ ^/ok-to-review\ ([0-9a-f]{7,40})[[:space:]]*$ ]]; then
