@@ -16,7 +16,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Hands a successful PR build over to review-processing/review. Called from a workflow_run
 # workflow of the source repository, so it always runs from the default branch and never
-# touches PR code. The review repository re-validates every input.
+# touches PR code. It decides who gets a review (author or /ok-to-review approval); the
+# review repository re-validates the other inputs.
 #
 # Caller:
 #   on: { workflow_run: { workflows: [codereview-pr], types: [completed] } }
@@ -71,10 +72,35 @@ jobs:
           # otherwise a fork could make the review repository cancel the review of another PR.
           pr_number=$(jq -r '.pr_number' "$META")
           [[ "$pr_number" =~ ^[0-9]+$ ]] || { echo "::error::Invalid PR number in artifact"; exit 1; }
-          if [[ "$(gh api "repos/$REPO/pulls/$pr_number" --jq '.head.sha')" != "$HEAD_SHA" ]]; then
+          pr=$(gh api "repos/$REPO/pulls/$pr_number")
+          if [[ "$(jq -r '.head.sha' <<< "$pr")" != "$HEAD_SHA" ]]; then
             echo "::notice::PR #$pr_number head is not $HEAD_SHA (outdated run or forged metadata)"
             exit 0
           fi
+
+          # The authorization boundary: review-processing/review does not re-check it.
+          # author_association is not used: it reports private org members as CONTRIBUTOR.
+          has_write() {
+            local role
+            role=$(gh api "repos/$REPO/collaborators/$1/permission" --jq '.role_name' 2>/dev/null || echo none)
+            [[ "$role" == admin || "$role" == maintain || "$role" == write ]]
+          }
+          authorized=false
+          if has_write "$(jq -r '.user.login' <<< "$pr")"; then
+            authorized=true
+          else
+            # /ok-to-review <sha> comments matching this commit, from users with write access
+            while read -r login; do
+              if [[ -n "$login" ]] && has_write "$login"; then authorized=true; break; fi
+            done < <(gh api "repos/$REPO/issues/$pr_number/comments" --paginate --jq '.[] | "\(.user.login) \(.body)"' \
+              | sed -nE 's/^([^ ]+) \/ok-to-review ([0-9a-f]{7,40})[[:space:]]*$/\1 \2/p' \
+              | while read -r login sha; do if [[ "$HEAD_SHA" == "$sha"* ]]; then echo "$login"; fi; done | sort -u)
+          fi
+          if [[ "$authorized" != true ]]; then
+            echo "::notice::PR #$pr_number: author has no write access and no '/ok-to-review ${HEAD_SHA}' from a maintainer"
+            exit 0
+          fi
+
           GH_TOKEN=$DISPATCH_TOKEN gh workflow run review.yaml -R review-processing/review \
             -f repo="$REPO" -f run_id="$RUN_ID" -f pr_number="$pr_number" -f head_sha="$HEAD_SHA"
           echo "Review of $REPO#$pr_number (${HEAD_SHA:0:7}) dispatched to review-processing/review"
